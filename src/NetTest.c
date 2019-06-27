@@ -17,7 +17,8 @@
 
 #define TRUE             1
 #define FALSE            0
-#define MASTER_PORT  "23232"
+#define MAX_PORT_CHARS 6
+#define MASTER_PORT    "23232"
 #define MAX_CONNECTIONS 20
 #define BLOCKING (0)
 #define NON_BLOCKING (1)
@@ -25,6 +26,8 @@
 typedef enum {
 	SOCK_STREAM_AF_UNSPEC,
 }_net_sock_cfg_t;
+
+
 
 int init_socket(char* addr, char* port, struct addrinfo **res, _net_sock_cfg_t type) {
 
@@ -134,11 +137,11 @@ void dump_addr_info(struct addrinfo *info) {
 /** Returns 0 on success, or -1 if there was an error */
 int set_socket_blocking_mode(int fd, int mode)
 {
-   if (fd < 0) return -1;
-   int flags = fcntl(fd, F_GETFL, 0);
-   if (flags == -1) return -1;
-   flags = (mode == BLOCKING) ? (flags & ~O_NONBLOCK) : (flags | O_NONBLOCK);
-   return (fcntl(fd, F_SETFL, flags) == 0) ? 0 : -1;
+	if (fd < 0) return -1;
+	int flags = fcntl(fd, F_GETFL, 0);
+	if (flags == -1) return -1;
+	flags = (mode == BLOCKING) ? (flags & ~O_NONBLOCK) : (flags | O_NONBLOCK);
+	return (fcntl(fd, F_SETFL, flags) == 0) ? 0 : -1;
 }
 
 int init_bind_socket(char* name, char* port, int mode) {
@@ -165,14 +168,14 @@ int init_bind_socket(char* name, char* port, int mode) {
 			}
 
 			if (mode == NON_BLOCKING) {
-				int on = 1;
-				//if (ioctl(sockfd, FIONBIO, (char *)&on) < 0)
+
 				if (set_socket_blocking_mode(sockfd, NON_BLOCKING) < 0)
 				{
 					perror("Can't set nonblocking: ioctl() failed");
 					sockfd = -1;
-                    continue;
+					continue;
 				}
+
 			}
 
 			if (bind(sockfd, p->ai_addr, p->ai_addrlen) == -1) {
@@ -290,9 +293,175 @@ void test_client() {
 
 }
 
-void master_server ()
+typedef struct{
+	char ip_addr[INET6_ADDRSTRLEN];
+	char port[MAX_PORT_CHARS];
+}reg_info_t;
+
+typedef struct {
+
+}result_t;
+
+typedef union {
+	reg_info_t reg;
+	result_t result;
+}ctrl_data_packet_t;
+
+typedef enum {
+	STOP,
+	RUN_PING = 0x5,
+	REGISTER_CLIENT,
+	START_MULTICAST_SERVER,
+	START_MULTICAST_CLIENT,
+	ACCEPT,
+	REJECT,
+	RESULT
+}ctrl_commands_t;
+
+typedef struct {
+	uint32_t packet_len;
+	uint16_t command;
+	ctrl_data_packet_t data;
+}ctr_packet_t;
+
+typedef enum{
+	INITIAL,
+	WAIT_CONNECTIONS,
+	RUN_TEST,
+	TEST_FINISHED
+}master_state_t;
+
+typedef enum{
+	INITIALIZATION,
+	BUSSY,
+	ERROR,
+	FINISHED
+}test_state_t;
+
+typedef struct {
+	int t_id;
+	int* nodes;
+	int required_nodes;
+	const char* desc;
+	test_state_t state;
+}test_context_t;
+
+typedef test_state_t (*test_hndl)(test_context_t* desc);
+
+typedef struct {
+	test_context_t context;
+	test_hndl hndl;
+} test_descriptor_t;
+
+
+
+test_state_t test1(test_context_t* desc){
+	switch(desc->state){
+	case INITIALIZATION:{
+		desc->state = BUSSY;
+		break;
+	}
+	case BUSSY:{
+		desc->state = ERROR;
+		break;
+	}
+	case ERROR:{
+		desc->state = FINISHED;
+		break;
+	}
+	case FINISHED:{
+		desc->state = FINISHED;
+		break;
+	}
+	}
+	printf("%s  state %d\n", __func__, desc->state);
+	return desc->state;
+}
+
+test_state_t test2(test_context_t* desc){
+	switch(desc->state){
+	case INITIALIZATION:{
+		desc->state = BUSSY;
+		break;
+	}
+	case BUSSY:{
+		desc->state = ERROR;
+		break;
+	}
+	case ERROR:{
+		desc->state = FINISHED;
+		break;
+	}
+	case FINISHED:{
+		desc->state = FINISHED;
+		break;
+	}
+	}
+	printf("%s  state %d\n", __func__, desc->state);
+	return desc->state;
+}
+
+test_state_t test3(test_context_t* desc){
+	switch(desc->state){
+	case INITIALIZATION:{
+		desc->state = BUSSY;
+		break;
+	}
+	case BUSSY:{
+		desc->state = ERROR;
+		break;
+	}
+	case ERROR:{
+		desc->state = FINISHED;
+		break;
+	}
+	case FINISHED:{
+		desc->state = FINISHED;
+		break;
+	}
+	}
+	printf("%s  state %d\n", __func__, desc->state);
+	return desc->state;
+}
+
+test_state_t test4(test_context_t* desc){
+	switch(desc->state){
+	case INITIALIZATION:{
+		desc->state = BUSSY;
+		break;
+	}
+	case BUSSY:{
+		desc->state = ERROR;
+		break;
+	}
+	case ERROR:{
+		desc->state = FINISHED;
+		break;
+	}
+	case FINISHED:{
+		desc->state = FINISHED;
+		break;
+	}
+	}
+	printf("%s  state %d\n", __func__, desc->state);
+	return desc->state;
+}
+
+#define CONTEXT_CREATION
+#include"test_cfg.h"
+
+test_descriptor_t test_descs[] = {
+#define TEST_DESCRIPTORS
+#include"test_cfg.h"
+};
+
+
+#define INITIAL_TIMEOUT         (0)
+#define TESTS_BEGIN_TIMEOUT
+
+void test_master ()
 {
-	int    len, rc;
+	int    len, rc, rc_poll;
 	int    listen_sd = -1, new_sd = -1;
 	int    end_server = FALSE, compress_array = FALSE;
 	int    close_conn;
@@ -300,6 +469,8 @@ void master_server ()
 	int    timeout;
 	struct pollfd fds[MAX_CONNECTIONS];
 	int    nfds = 1, current_size = 0, i, j;
+	static uint32_t state = INITIAL;
+	int test_counter = 0;
 
 	/* Create an socket to receive incoming connections          */
 	listen_sd = init_bind_socket(NULL, MASTER_PORT, NON_BLOCKING);
@@ -325,187 +496,228 @@ void master_server ()
 	fds[0].events = POLLIN;
 
 	/* Initialize the timeout*/
-	timeout = (3 * 60 * 1000);
+	timeout = INITIAL_TIMEOUT;
 
 	/* Loop waiting for incoming connects or for incoming data */
 	do
 	{
 		/* Call poll() with timeout */
 		printf("Waiting on poll()...\n");
-		rc = poll(fds, nfds, timeout);
+		rc_poll = poll(fds, nfds, timeout);
 
 		/* Check to see if the poll call failed. */
-		if (rc < 0)
+		if (rc_poll < 0)
 		{
 			perror("  poll() failed");
 			break;
 		}
 
 		/* Check to see if the time out expired. */
-		if (rc == 0)
-		{
-			printf("  poll() timed out.  End program.\n");
+		if (rc_poll != 0) {
+
+			/* One or more descriptors are readable.  Need to          */
+			/* determine which ones they are.                          */
+			current_size = nfds;
+			for (i = 0; i < current_size; i++)
+			{
+				/* Loop through to find the descriptors that returned    */
+				/* POLLIN and determine whether it's the listening       */
+				/* or the active connection.                             */
+				if(fds[i].revents == 0)
+					continue;
+
+				/* If revents is not POLLIN, it's an unexpected result,  */
+				/* log and end the server.                               */
+				if(fds[i].revents != POLLIN)
+				{
+					printf("  Error! revents = %d\n", fds[i].revents);
+					end_server = TRUE;
+					break;
+
+				}
+				if (fds[i].fd == listen_sd)
+				{
+					/* Listening descriptor is readable.                   */
+					printf("  Listening socket is readable\n");
+
+					/* Accept all incoming connections that are            */
+					/* queued up on the listening socket before we         */
+					/* loop back and call poll again.                      */
+					do
+					{
+						/* Accept each incoming connection. */
+						new_sd = accept(listen_sd, NULL, NULL);
+						if (new_sd < 0)
+						{
+							if (errno != EWOULDBLOCK)
+							{
+								perror("  accept() failed");
+								end_server = TRUE;
+							}
+							break;
+						}
+
+						if(nfds >= MAX_CONNECTIONS) {
+							perror("Can't  accept() connection: maximum allowed reached");
+							close(new_sd);
+							continue;
+						}
+
+						set_socket_blocking_mode(new_sd, NON_BLOCKING);
+
+						/* Add descriptor to poll*/
+						printf("  New incoming connection - %d\n", new_sd);
+						fds[nfds].fd = new_sd;
+						fds[nfds].events = POLLIN;
+						nfds++;
+
+					} while (new_sd != -1);
+
+				}
+				/* This is not the listening socket, therefore an        */
+				/* existing connection must be readable                  */
+				else
+				{
+					printf("  Descriptor %d is readable\n", fds[i].fd);
+					close_conn = FALSE;
+
+					/* Receive all incoming data on this socket            */
+					/* before we loop back and call poll again.            */
+					do
+					{
+						/* Receive data on this connection until the         */
+						/* recv fails with EWOULDBLOCK. If any other         */
+						/* failure occurs, we will close the                 */
+						/* connection.                                       */
+						rc = recv(fds[i].fd, buffer, sizeof(buffer), 0);
+						if (rc < 0)
+						{
+							if (errno != EWOULDBLOCK)
+							{
+								perror("  recv() failed");
+								close_conn = TRUE;
+							}
+							break;
+						}
+
+						/* Check to see if the connection has been           */
+						/* closed by the client                              */
+						if (rc == 0)
+						{
+							printf("  Connection closed\n");
+							close_conn = TRUE;
+							break;
+						}
+
+						/* Data was received                                 */
+						len = rc;
+						printf("  %d bytes received\n", len);
+
+
+						rc = send(fds[i].fd, buffer, len, 0);
+						if (rc < 0)
+						{
+							perror("  send() failed");
+							close_conn = TRUE;
+							break;
+						}
+
+					} while(TRUE);
+
+					/*******************************************************/
+					/* If the close_conn flag was turned on, we need       */
+					/* to clean up this active connection. This            */
+					/* clean up process includes removing the              */
+					/* descriptor.                                         */
+					/*******************************************************/
+					if (close_conn)
+					{
+						close(fds[i].fd);
+						fds[i].fd = -1;
+						compress_array = TRUE;
+					}
+
+
+				}  /* End of existing connection is readable             */
+			} /* End of loop through pollable descriptors              */
+		}
+
+		switch(state) {
+
+		case INITIAL: {
+
+			if (test_counter >= sizeof(test_descs)/sizeof(test_descs[0])) {
+				printf("All test are executed. End program.\n");
+				end_server = TRUE;
+			}
+			else {
+				timeout = 10000;
+				if(nfds >= test_descs[test_counter].context.required_nodes) {
+					int i;
+					//set test context
+					for (i=0; i < test_descs[test_counter].context.required_nodes; i++) {
+						test_descs[test_counter].context.nodes[i] = fds[i + 1].fd;
+						//		assert(test_descs[test_counter].context.nodes[i] != -1);
+					}
+					state = RUN_TEST;
+				}
+				else {
+					state = WAIT_CONNECTIONS;
+				}
+			}
+			break;
+		}
+		case WAIT_CONNECTIONS: {
+			if (rc_poll == 0) {
+				printf("  poll() timed out in state %d test id %d.  End program.\n",
+									   state, test_descs[test_counter].context.t_id);
+				end_server = TRUE;
+				break;
+			}
+			if(nfds >= test_descs[test_counter].context.required_nodes) {
+				int i;
+				//set test context
+				for (i=0; i < test_descs[test_counter].context.required_nodes; i++) {
+					test_descs[test_counter].context.nodes[i] = fds[i + 1].fd;
+					//		assert(test_descs[test_counter].context.nodes[i] != -1);
+				}
+				state = RUN_TEST;
+			}
+			break;
+		}
+		case RUN_TEST:{
+			if (rc_poll == 0) {
+				printf("  poll() timed out in state %d test id %d.  End program.\n",
+					   state, test_descs[test_counter].context.t_id);
+				end_server = TRUE;
+				break;
+			}
+			if( FINISHED == test_descs[test_counter].hndl(&test_descs[test_counter].context) ){
+				timeout = INITIAL_TIMEOUT;
+				test_counter++;
+				state = TEST_FINISHED;
+			}
+			break;
+		}
+		case TEST_FINISHED:{
+			state   = INITIAL;
+			timeout = INITIAL_TIMEOUT;
 			break;
 		}
 
-		/* One or more descriptors are readable.  Need to          */
-		/* determine which ones they are.                          */
-		current_size = nfds;
-		for (i = 0; i < current_size; i++)
-		{
-			/*********************************************************/
-			/* Loop through to find the descriptors that returned    */
-			/* POLLIN and determine whether it's the listening       */
-			/* or the active connection.                             */
-			/*********************************************************/
-			if(fds[i].revents == 0)
-				continue;
+		default: {
+			printf("Error: Wrong state %d.  End program.\n", state);
+			end_server = TRUE;
+		}
+		}
 
-			/*********************************************************/
-			/* If revents is not POLLIN, it's an unexpected result,  */
-			/* log and end the server.                               */
-			/*********************************************************/
-			if(fds[i].revents != POLLIN)
-			{
-				printf("  Error! revents = %d\n", fds[i].revents);
-				end_server = TRUE;
-				break;
+		printf(" state %d\n", state);
 
-			}
-			if (fds[i].fd == listen_sd)
-			{
-				/* Listening descriptor is readable.                   */
-				printf("  Listening socket is readable\n");
-
-				/* Accept all incoming connections that are            */
-				/* queued up on the listening socket before we         */
-				/* loop back and call poll again.                      */
-				do
-				{
-					/*****************************************************/
-					/* Accept each incoming connection. If               */
-					/* accept fails with EWOULDBLOCK, then we            */
-					/* have accepted all of them. Any other              */
-					/* failure on accept will cause us to end the        */
-					/* server.                                           */
-					/*****************************************************/
-					new_sd = accept(listen_sd, NULL, NULL);
-					if (new_sd < 0)
-					{
-						if (errno != EWOULDBLOCK)
-						{
-							perror("  accept() failed");
-							end_server = TRUE;
-						}
-						break;
-					}
-
-					if(nfds >= MAX_CONNECTIONS) {
-						perror("Can't  accept() connection: maximum allowed reached");
-						close(new_sd);
-						continue;
-					}
-
-					set_socket_blocking_mode(new_sd, NON_BLOCKING);
-					/*****************************************************/
-					/* Add the new incoming connection to the            */
-					/* pollfd structure                                  */
-					/*****************************************************/
-					printf("  New incoming connection - %d\n", new_sd);
-					fds[nfds].fd = new_sd;
-					fds[nfds].events = POLLIN;
-					nfds++;
-
-				} while (new_sd != -1);
-			}
-
-			/*********************************************************/
-			/* This is not the listening socket, therefore an        */
-			/* existing connection must be readable                  */
-			/*********************************************************/
-
-			else
-			{
-				printf("  Descriptor %d is readable\n", fds[i].fd);
-				close_conn = FALSE;
-				/*******************************************************/
-				/* Receive all incoming data on this socket            */
-				/* before we loop back and call poll again.            */
-				/*******************************************************/
-
-				do
-				{
-					/*****************************************************/
-					/* Receive data on this connection until the         */
-					/* recv fails with EWOULDBLOCK. If any other         */
-					/* failure occurs, we will close the                 */
-					/* connection.                                       */
-					/*****************************************************/
-					rc = recv(fds[i].fd, buffer, sizeof(buffer), 0);
-					if (rc < 0)
-					{
-						if (errno != EWOULDBLOCK)
-						{
-							perror("  recv() failed");
-							close_conn = TRUE;
-						}
-						break;
-					}
-
-					/*****************************************************/
-					/* Check to see if the connection has been           */
-					/* closed by the client                              */
-					/*****************************************************/
-					if (rc == 0)
-					{
-						printf("  Connection closed\n");
-						close_conn = TRUE;
-						break;
-					}
-
-					/*****************************************************/
-					/* Data was received                                 */
-					/*****************************************************/
-					len = rc;
-					printf("  %d bytes received\n", len);
-
-					/*****************************************************/
-					/* Echo the data back to the client                  */
-					/*****************************************************/
-					rc = send(fds[i].fd, buffer, len, 0);
-					if (rc < 0)
-					{
-						perror("  send() failed");
-						close_conn = TRUE;
-						break;
-					}
-
-				} while(TRUE);
-
-				/*******************************************************/
-				/* If the close_conn flag was turned on, we need       */
-				/* to clean up this active connection. This            */
-				/* clean up process includes removing the              */
-				/* descriptor.                                         */
-				/*******************************************************/
-				if (close_conn)
-				{
-					close(fds[i].fd);
-					fds[i].fd = -1;
-					compress_array = TRUE;
-				}
-
-
-			}  /* End of existing connection is readable             */
-		} /* End of loop through pollable descriptors              */
-
-		/***********************************************************/
 		/* If the compress_array flag was turned on, we need       */
 		/* to squeeze together the array and decrement the number  */
 		/* of file descriptors. We do not need to move back the    */
 		/* events and revents fields because the events will always*/
 		/* be POLLIN in this case, and revents is output.          */
-		/***********************************************************/
 		if (compress_array)
 		{
 			compress_array = FALSE;
@@ -537,41 +749,11 @@ void master_server ()
 
 int main(int argc, char *argv[])
 {
-#if 1
-	master_server();
-#else
-	struct addrinfo *res = NULL;
-	int sockfd;
-	char* name = NULL;
-	char* port = NULL;
-
-	if (argc < 2) {
-		fprintf(stderr,"usage: showip hostname\n");
-		return 1;
+	if(argc > 2) {
+		test_client();
 	}
-	if (strcmp(argv[1], "NULL")) {
-		name = argv[1];
+	else {
+		test_master();
 	}
-	if (argc == 3) {
-		port = argv[2];
-	}
-
-	sockfd = init_socket(name, port, &res, SOCK_STREAM_AF_UNSPEC);
-
-	printf("IP addresses for %s:\n\n", argv[1]);
-
-	dump_addr_info(res);
-
-	if(sockfd < 0) {
-		printf("Socket init error: %s %s:\n\n", argv[1], port);
-		return 1;
-	}
-
-	close(sockfd);
-
-	freeaddrinfo(res); // free the linked list
-
-	test_server(name, port);
-#endif
 	return 0;
 }
