@@ -1,293 +1,33 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include <unistd.h>
 #include <errno.h>
-#include <string.h>
-#include <sys/types.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <netdb.h>
-#include <arpa/inet.h>
-#include <sys/wait.h>
-#include <signal.h>
+#include <fcntl.h>
 
+#include <signal.h>
+#include <string.h>
+#include <unistd.h>
+
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <netpacket/packet.h>
+#include <net/ethernet.h>
 #include <sys/ioctl.h>
 #include <sys/poll.h>
+#include <sys/socket.h>
 #include <sys/time.h>
+#include <sys/types.h>
+#include <sys/wait.h>
 
-#define TRUE             1
+#include "socket_helper.h"
+
+#define LISTENER_FD_IDX 0
+#define SNIFF_FD_IDX    1
+
+#define TRUE             1 //dell me
 #define FALSE            0
 #define MAX_PORT_CHARS 6
 #define MASTER_PORT    "23232"
 #define MAX_CONNECTIONS 20
-#define BLOCKING (0)
-#define NON_BLOCKING (1)
-
-typedef enum {
-	SOCK_STREAM_AF_UNSPEC,
-}_net_sock_cfg_t;
-
-
-
-int init_socket(char* addr, char* port, struct addrinfo **res, _net_sock_cfg_t type) {
-
-	struct addrinfo hints;
-	int sockfd = -1;
-	int status = 0;
-
-
-	memset(&hints, 0, sizeof hints);
-	switch(type) {
-	case SOCK_STREAM_AF_UNSPEC: {
-		hints.ai_family = AF_UNSPEC;  // use IPv4 or IPv6, whichever
-		hints.ai_socktype = SOCK_STREAM;
-		break;
-	}
-	default: {
-		fprintf(stderr, "getaddrinfo: wrong type %d\n", type);
-		status = -1;
-	}
-	}
-
-	if(0 == status) {
-		if(NULL == addr) {
-			hints.ai_flags = AI_PASSIVE; // fill my local IP, when the addr is NULL
-		}
-
-		if ((status = getaddrinfo(addr, port, &hints, res)) == 0) {
-			// make a socket:
-			sockfd = socket((*res)->ai_family, (*res)->ai_socktype, (*res)->ai_protocol);
-		}
-		else {
-			fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(status));
-		}
-	}
-	return sockfd;
-}
-
-int get_addrinfo(char* addr, char* port, struct addrinfo **res, _net_sock_cfg_t type) {
-
-	struct addrinfo hints;
-	int status = 0;
-
-
-	memset(&hints, 0, sizeof hints);
-
-	switch(type) {
-	case SOCK_STREAM_AF_UNSPEC: {
-		hints.ai_family = AF_UNSPEC;  // use IPv4 or IPv6, whichever
-		hints.ai_socktype = SOCK_STREAM;
-		break;
-	}
-	default: {
-		fprintf(stderr, "getaddrinfo: wrong type %d\n", type);
-		status = -1;
-	}
-	}
-
-	if(0 == status) {
-
-		if(NULL == addr) {
-			hints.ai_flags = AI_PASSIVE; // fill my local IP, when the addr is NULL
-		}
-
-		status = getaddrinfo(addr, port, &hints, res);
-
-		if (0 != status) {
-			fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(status));
-		}
-	}
-
-	return status;
-}
-
-void dump_addr_info(struct addrinfo *info) {
-
-	struct addrinfo  *p;
-	char ipstr[INET6_ADDRSTRLEN];
-
-	if(NULL == info) {
-		fprintf(stderr, "adrrinfo is NULL");
-		return;
-	}
-
-	for(p = info;p != NULL; p = p->ai_next) {
-		void *addr;
-		char *ipver;
-		// get the pointer to the address itself,
-		// different fields in IPv4 and IPv6:
-		if (p->ai_family == AF_INET) { // IPv4
-			struct sockaddr_in *ipv4 = (struct sockaddr_in *)p->ai_addr;
-			addr = &(ipv4->sin_addr);
-			ipver = "IPv4";
-		} else { // IPv6
-			struct sockaddr_in6 *ipv6 = (struct sockaddr_in6 *)p->ai_addr;
-			addr = &(ipv6->sin6_addr);
-			ipver = "IPv6";
-		}
-
-		// convert the IP to a string and print it:
-		inet_ntop(p->ai_family, addr, ipstr, sizeof ipstr);
-		printf("  %s: %s\n", ipver, ipstr);
-	}
-}
-
-#include <fcntl.h>
-
-/** Returns 0 on success, or -1 if there was an error */
-int set_socket_blocking_mode(int fd, int mode)
-{
-	if (fd < 0) return -1;
-	int flags = fcntl(fd, F_GETFL, 0);
-	if (flags == -1) return -1;
-	flags = (mode == BLOCKING) ? (flags & ~O_NONBLOCK) : (flags | O_NONBLOCK);
-	return (fcntl(fd, F_SETFL, flags) == 0) ? 0 : -1;
-}
-
-int init_bind_socket(char* name, char* port, int mode) {
-
-	int sockfd = -1;
-	int yes=1;
-	struct addrinfo *servinfo = NULL, *p = NULL;
-
-	if (0 == get_addrinfo(name, port, &servinfo, SOCK_STREAM_AF_UNSPEC)) {
-		// loop through all the results and bind to the first we can
-		for(p = servinfo; p != NULL; p = p->ai_next) {
-			if ((sockfd = socket(p->ai_family, p->ai_socktype,
-					p->ai_protocol)) == -1) {
-				perror("server: socket");
-				continue;
-			}
-
-			if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &yes,
-					sizeof(int)) == -1) {
-				perror("setsockopt");
-				close(sockfd);
-				sockfd = -1;
-				continue;
-			}
-
-			if (mode == NON_BLOCKING) {
-
-				if (set_socket_blocking_mode(sockfd, NON_BLOCKING) < 0)
-				{
-					perror("Can't set nonblocking: ioctl() failed");
-					sockfd = -1;
-					continue;
-				}
-
-			}
-
-			if (bind(sockfd, p->ai_addr, p->ai_addrlen) == -1) {
-				perror("server: bind");
-				close(sockfd);
-				sockfd = -1;
-				continue;
-			}
-
-			break;
-		}
-	}
-
-	freeaddrinfo(servinfo);
-
-	return sockfd;
-}
-
-// get sockaddr, IPv4 or IPv6:
-void *get_in_addr(struct sockaddr *sa)
-{
-	if (sa->sa_family == AF_INET) {
-		return &(((struct sockaddr_in*)sa)->sin_addr);
-	}
-
-	return &(((struct sockaddr_in6*)sa)->sin6_addr);
-}
-
-void chld_handler(int s)
-{
-	// waitpid() might overwrite errno, so we save and restore it:
-	int saved_errno = errno;
-	fprintf(stderr, "chld_handler\n");
-	while(waitpid(-1, NULL, WNOHANG) > 0);
-
-	errno = saved_errno;
-	fprintf(stderr, "exit-->chld_handler\n");
-	exit(0);
-}
-
-#define BACKLOG 10     // how many pending connections queue will hold
-
-void test_server(char* name, char* port) {
-	int sockfd = init_bind_socket(name, port, BLOCKING);
-	struct sockaddr_storage their_addr; // connector's address information
-	socklen_t sin_size;
-	struct sigaction sa;
-	int new_fd;
-	char s[INET6_ADDRSTRLEN];
-
-	if (listen(sockfd, BACKLOG) == -1) {
-		perror("listen");
-		exit(1);
-	}
-#if 1
-	sa.sa_handler = chld_handler; // reap all dead processes
-	sigemptyset(&sa.sa_mask);
-	sa.sa_flags = SA_RESTART;
-	if (sigaction(SIGINT, &sa, NULL) == -1) {
-		perror("sigaction");
-		exit(1);
-	}
-
-
-#endif
-	printf("server: waiting for connections...\n");
-
-	while(1) {  // main accept() loop
-		sin_size = sizeof their_addr;
-		new_fd = accept(sockfd, (struct sockaddr *)&their_addr, &sin_size);
-		if (new_fd == -1) {
-			perror("accept");
-			continue;
-		}
-
-		inet_ntop(their_addr.ss_family,
-				get_in_addr((struct sockaddr *)&their_addr),
-				s, sizeof s);
-		printf("server: got connection from %s\n", s);
-
-		if (!fork()) { // this is the child process
-			close(sockfd); // child doesn't need the listener
-			static int run = 1;
-#if 1
-			void end_handler(int s)
-			{
-				sleep(10);
-				fprintf(stderr, "exit-->\n");
-
-				run = 0;
-			}
-			perror("start new proc");
-			sa.sa_handler = end_handler;
-			sigemptyset(&sa.sa_mask);
-			sa.sa_flags = SA_RESTART;
-			if (sigaction(SIGINT, &sa, NULL) == -1) {
-				perror("sigaction");
-				exit(1);
-			}
-#endif
-
-			while(run) {
-				if (send(new_fd, "Hello, world!", 13, 0) == -1)
-					perror("send");
-				sleep(2);
-			}
-			close(new_fd);
-			exit(0);
-		}
-		close(new_fd);  // parent doesn't need this
-	}
-}
 
 void test_client() {
 
@@ -296,16 +36,16 @@ void test_client() {
 typedef struct{
 	char ip_addr[INET6_ADDRSTRLEN];
 	char port[MAX_PORT_CHARS];
-}reg_info_t;
+} reg_info_t;
 
 typedef struct {
 
-}result_t;
+} result_t;
 
 typedef union {
 	reg_info_t reg;
 	result_t result;
-}ctrl_data_packet_t;
+} ctrl_data_packet_t;
 
 typedef enum {
 	STOP,
@@ -316,27 +56,27 @@ typedef enum {
 	ACCEPT,
 	REJECT,
 	RESULT
-}ctrl_commands_t;
+} ctrl_commands_t;
 
 typedef struct {
 	uint32_t packet_len;
 	uint16_t command;
 	ctrl_data_packet_t data;
-}ctr_packet_t;
+} ctr_packet_t;
 
-typedef enum{
+typedef enum {
 	INITIAL,
 	WAIT_CONNECTIONS,
 	RUN_TEST,
 	TEST_FINISHED
-}master_state_t;
+} master_state_t;
 
-typedef enum{
+typedef enum {
 	INITIALIZATION,
 	BUSSY,
 	ERROR,
 	FINISHED
-}test_state_t;
+} test_state_t;
 
 typedef struct {
 	int t_id;
@@ -344,7 +84,7 @@ typedef struct {
 	int required_nodes;
 	const char* desc;
 	test_state_t state;
-}test_context_t;
+} test_context_t;
 
 typedef test_state_t (*test_hndl)(test_context_t* desc);
 
@@ -352,8 +92,6 @@ typedef struct {
 	test_context_t context;
 	test_hndl hndl;
 } test_descriptor_t;
-
-
 
 test_state_t test1(test_context_t* desc){
 	switch(desc->state){
@@ -455,46 +193,138 @@ test_descriptor_t test_descs[] = {
 #include"test_cfg.h"
 };
 
+void print_macs(struct ether_header* eh ) {
+	mac_addr_t mac_d={0};
+	mac_addr_t mac_s={0};
 
-#define INITIAL_TIMEOUT         (0)
-#define TESTS_BEGIN_TIMEOUT
+	memcpy(mac_d.mac_arrea, eh->ether_dhost, MAC_ADDR_LEN);
+	memcpy(mac_s.mac_arrea, eh->ether_shost, MAC_ADDR_LEN);
 
-void test_master ()
+	printf("d_mac: '%012lx', s_mac:  '%012lx' type '%x' '%s'\n",
+			htobe64(mac_d.mac)>>16,
+			htobe64(mac_s.mac)>>16,
+			htobe16(eh->ether_type),
+			protocol_name(htobe16(eh->ether_type))
+	);
+}
+
+#define INITIAL_TIMEOUT         (100)
+
+int do_sniff(int fd) {
+	int rval;
+	char buf[6666];
+	/* Header structures */
+	struct sockaddr_ll rcvaddr;
+	struct ether_header *eh = (struct ether_header *) buf;
+	socklen_t lens = sizeof(struct sockaddr);
+	memset(buf,0,sizeof(buf));
+	do	{
+
+		rval = recvfrom(fd,buf,sizeof(buf),0,(struct sockaddr*)&rcvaddr,&lens);
+		if(rval < 0)
+		{
+			if (errno != EWOULDBLOCK)
+			{
+				perror("  recv() failed");
+				fd = -1;
+			}
+			break;
+		}
+		printf("LEN=%d ", rval);
+		print_macs(eh);
+
+	} while(rval > 0);
+
+	return fd;
+}
+
+typedef enum {
+   C_IDLE,
+   C_ACCEPTED,
+   C_CONNECTED,
+   C_DISCONNECTED,
+   C_CLOSED
+} con_status_t;
+
+typedef struct {
+	con_status_t status;
+	struct addrinfo *add_info;
+	void* conn_data;
+}connection_ctx_t;
+
+typedef struct {
+	connection_ctx_t con[MAX_CONNECTIONS];
+	struct pollfd    fds[MAX_CONNECTIONS];
+	int nfds;
+}master_ctx_t;
+
+master_ctx_t master_ctx;
+
+static void init_master_ctx(master_ctx_t* mctx) {
+
+	if(mctx) {
+
+		int i;
+		memset(mctx, 0, sizeof(mctx[0]));
+		for(i = 0; i < MAX_CONNECTIONS; i++) {
+			mctx->fds[i].fd = 0;
+			mctx->fds[i].events = POLLIN;
+			mctx->con[i].status = C_IDLE;
+		}
+	}
+}
+
+void test_master (char* eth)
 {
 	int    len, rc, rc_poll;
-	int    listen_sd = -1, new_sd = -1;
+	int     new_sd = -1;
 	int    end_server = FALSE, compress_array = FALSE;
 	int    close_conn;
 	char   buffer[80];
 	int    timeout;
-	struct pollfd fds[MAX_CONNECTIONS];
-	int    nfds = 1, current_size = 0, i, j;
+//	struct pollfd fds[MAX_CONNECTIONS];
+	int    current_size = 0, i, j;
 	static uint32_t state = INITIAL;
 	int test_counter = 0;
+	short int old_if_mode;
 
-	/* Create an socket to receive incoming connections          */
-	listen_sd = init_bind_socket(NULL, MASTER_PORT, NON_BLOCKING);
+	init_master_ctx(&master_ctx);
+	/* Create an socket to receive incoming connections  (listener)    */
+	new_sd = init_socket(NULL, MASTER_PORT, SOCK_STREAM_AF_UNSPEC,
+			SOCKET_NON_BLOCKING | SOCKET_BIND);
 
-	if (listen_sd < 0)
+	if (new_sd < 0)
 	{
 		perror("socket() failed");
 		exit(-1);
 	}
 
-	rc = listen(listen_sd, 32);
+	rc = listen(new_sd, 32);
 	if (rc < 0)
 	{
 		perror("listen() failed");
-		close(listen_sd);
+		close(new_sd);
 		exit(-1);
 	}
 
-	memset(fds, 0 , sizeof(fds));
-
 	/* Set up the initial listening socket                        */
-	fds[0].fd = listen_sd;
-	fds[0].events = POLLIN;
+	master_ctx.fds[master_ctx.nfds].fd = new_sd;
+	master_ctx.con[master_ctx.nfds].status = C_CONNECTED;
+	master_ctx.nfds++;
 
+	/*Init Raw sniff socket*/
+	new_sd = init_socket(NULL, NULL, SOCK_SNIF_ROW_ETH, SOCKET_NON_BLOCKING);
+
+	if (new_sd < 0)
+	{
+		perror("sniff socket() failed");
+		exit(-1);
+	}
+	old_if_mode = set_promiscuous(eth, &new_sd, TRUE);
+
+	master_ctx.fds[master_ctx.nfds].fd = new_sd;
+	master_ctx.con[master_ctx.nfds].status = C_CONNECTED;
+	master_ctx.nfds++;
 	/* Initialize the timeout*/
 	timeout = INITIAL_TIMEOUT;
 
@@ -503,7 +333,7 @@ void test_master ()
 	{
 		/* Call poll() with timeout */
 		printf("Waiting on poll()...\n");
-		rc_poll = poll(fds, nfds, timeout);
+		rc_poll = poll(master_ctx.fds, master_ctx.nfds, timeout);
 
 		/* Check to see if the poll call failed. */
 		if (rc_poll < 0)
@@ -515,28 +345,28 @@ void test_master ()
 		/* Check to see if the time out expired. */
 		if (rc_poll != 0) {
 
-			/* One or more descriptors are readable.  Need to          */
+			/* One or more descriptors are readable. Need to          */
 			/* determine which ones they are.                          */
-			current_size = nfds;
+			current_size = master_ctx.nfds;
 			for (i = 0; i < current_size; i++)
 			{
 				/* Loop through to find the descriptors that returned    */
 				/* POLLIN and determine whether it's the listening       */
 				/* or the active connection.                             */
-				if(fds[i].revents == 0)
+				if(master_ctx.fds[i].revents == 0)
 					continue;
 
 				/* If revents is not POLLIN, it's an unexpected result,  */
 				/* log and end the server.                               */
-				if(fds[i].revents != POLLIN)
+				if(master_ctx.fds[i].revents != POLLIN)
 				{
-					printf("  Error! revents = %d\n", fds[i].revents);
+					printf("  Error! revents = %d\n", master_ctx.fds[i].revents);
 					end_server = TRUE;
 					break;
 
 				}
-				if (fds[i].fd == listen_sd)
-				{
+
+				if (i == LISTENER_FD_IDX) {
 					/* Listening descriptor is readable.                   */
 					printf("  Listening socket is readable\n");
 
@@ -546,7 +376,7 @@ void test_master ()
 					do
 					{
 						/* Accept each incoming connection. */
-						new_sd = accept(listen_sd, NULL, NULL);
+						new_sd = accept(master_ctx.fds[i].fd, NULL, NULL);
 						if (new_sd < 0)
 						{
 							if (errno != EWOULDBLOCK)
@@ -557,7 +387,7 @@ void test_master ()
 							break;
 						}
 
-						if(nfds >= MAX_CONNECTIONS) {
+						if(master_ctx.nfds >= MAX_CONNECTIONS) {
 							perror("Can't  accept() connection: maximum allowed reached");
 							close(new_sd);
 							continue;
@@ -567,18 +397,25 @@ void test_master ()
 
 						/* Add descriptor to poll*/
 						printf("  New incoming connection - %d\n", new_sd);
-						fds[nfds].fd = new_sd;
-						fds[nfds].events = POLLIN;
-						nfds++;
+						master_ctx.fds[master_ctx.nfds].fd = new_sd;
+						master_ctx.fds[master_ctx.nfds].events = POLLIN;
+						master_ctx.nfds++;
 
 					} while (new_sd != -1);
 
+				} else if (i == SNIFF_FD_IDX) {
+
+					/*Sniff socket processing*/
+					if(do_sniff(master_ctx.fds[i].fd) < 0) {
+						perror(" Sniffing failed");
+						end_server = TRUE;
+					}
 				}
 				/* This is not the listening socket, therefore an        */
 				/* existing connection must be readable                  */
 				else
 				{
-					printf("  Descriptor %d is readable\n", fds[i].fd);
+					printf("  Descriptor %d is readable\n", master_ctx.fds[i].fd);
 					close_conn = FALSE;
 
 					/* Receive all incoming data on this socket            */
@@ -589,7 +426,7 @@ void test_master ()
 						/* recv fails with EWOULDBLOCK. If any other         */
 						/* failure occurs, we will close the                 */
 						/* connection.                                       */
-						rc = recv(fds[i].fd, buffer, sizeof(buffer), 0);
+						rc = recv(master_ctx.fds[i].fd, buffer, sizeof(buffer), 0);
 						if (rc < 0)
 						{
 							if (errno != EWOULDBLOCK)
@@ -611,10 +448,10 @@ void test_master ()
 
 						/* Data was received                                 */
 						len = rc;
-						printf("  %d bytes received\n", len);
+						printf("  %d bytes received------------------------------------------------------->\n", len);
 
 
-						rc = send(fds[i].fd, buffer, len, 0);
+						rc = send(master_ctx.fds[i].fd, buffer, len, 0);
 						if (rc < 0)
 						{
 							perror("  send() failed");
@@ -632,12 +469,11 @@ void test_master ()
 					/*******************************************************/
 					if (close_conn)
 					{
-						close(fds[i].fd);
-						fds[i].fd = -1;
+						printf("!!! Close connection %d",i);
+						close(master_ctx.fds[i].fd);
+						master_ctx.fds[i].fd = -1;
 						compress_array = TRUE;
 					}
-
-
 				}  /* End of existing connection is readable             */
 			} /* End of loop through pollable descriptors              */
 		}
@@ -652,12 +488,11 @@ void test_master ()
 			}
 			else {
 				timeout = 10000;
-				if(nfds >= test_descs[test_counter].context.required_nodes) {
+				if(master_ctx.nfds >= test_descs[test_counter].context.required_nodes) {
 					int i;
 					//set test context
 					for (i=0; i < test_descs[test_counter].context.required_nodes; i++) {
-						test_descs[test_counter].context.nodes[i] = fds[i + 1].fd;
-						//		assert(test_descs[test_counter].context.nodes[i] != -1);
+						test_descs[test_counter].context.nodes[i] = master_ctx.fds[i + 1].fd;
 					}
 					state = RUN_TEST;
 				}
@@ -670,15 +505,15 @@ void test_master ()
 		case WAIT_CONNECTIONS: {
 			if (rc_poll == 0) {
 				printf("  poll() timed out in state %d test id %d.  End program.\n",
-									   state, test_descs[test_counter].context.t_id);
+						state, test_descs[test_counter].context.t_id);
 				end_server = TRUE;
 				break;
 			}
-			if(nfds >= test_descs[test_counter].context.required_nodes) {
+			if(master_ctx.nfds >= test_descs[test_counter].context.required_nodes) {
 				int i;
 				//set test context
 				for (i=0; i < test_descs[test_counter].context.required_nodes; i++) {
-					test_descs[test_counter].context.nodes[i] = fds[i + 1].fd;
+					test_descs[test_counter].context.nodes[i] = master_ctx.fds[i + 1].fd;
 					//		assert(test_descs[test_counter].context.nodes[i] != -1);
 				}
 				state = RUN_TEST;
@@ -688,19 +523,19 @@ void test_master ()
 		case RUN_TEST:{
 			if (rc_poll == 0) {
 				printf("  poll() timed out in state %d test id %d.  End program.\n",
-					   state, test_descs[test_counter].context.t_id);
+						state, test_descs[test_counter].context.t_id);
 				end_server = TRUE;
 				break;
 			}
 			if( FINISHED == test_descs[test_counter].hndl(&test_descs[test_counter].context) ){
 				timeout = INITIAL_TIMEOUT;
-				test_counter++;
 				state = TEST_FINISHED;
 			}
 			break;
 		}
 		case TEST_FINISHED:{
 			state   = INITIAL;
+			test_counter++;
 			timeout = INITIAL_TIMEOUT;
 			break;
 		}
@@ -721,39 +556,47 @@ void test_master ()
 		if (compress_array)
 		{
 			compress_array = FALSE;
-			for (i = 0; i < nfds; i++)
+			for (i = 0; i < master_ctx.nfds; i++)
 			{
-				if (fds[i].fd == -1)
+				if (master_ctx.fds[i].fd == -1)
 				{
-					for(j = i; j < nfds; j++)
+					for(j = i; j < master_ctx.nfds; j++)
 					{
-						fds[j].fd = fds[j+1].fd;
+						master_ctx.fds[j].fd = master_ctx.fds[j+1].fd;
 					}
 					i--;
-					nfds--;
+					master_ctx.nfds--;
 				}
 			}
 		}
 
 	} while (end_server == FALSE); /* End of serving running.    */
 
+	/*************************************************************
+	 * Return old promiscuous mode
+	 *************************************************************/
+	if(!(old_if_mode & IFF_PROMISC)) {
+		set_promiscuous(eth, &master_ctx.fds[SNIFF_FD_IDX].fd, FALSE);
+	}
 	/*************************************************************/
 	/* Clean up all of the sockets that are open                 */
 	/*************************************************************/
-	for (i = 0; i < nfds; i++)
+	for (i = 0; i < master_ctx.nfds; i++)
 	{
-		if(fds[i].fd >= 0)
-			close(fds[i].fd);
+		if(master_ctx.fds[i].fd >= 0)
+			close(master_ctx.fds[i].fd);
 	}
+
 }
 
 int main(int argc, char *argv[])
 {
+	//	Sniff("wlp2s0");//wlp2s0 enp0s25:
 	if(argc > 2) {
 		test_client();
 	}
 	else {
-		test_master();
+		test_master("enp0s25");
 	}
 	return 0;
 }
