@@ -29,7 +29,7 @@ typedef union {
 }mac_addr_t;
 
 const char* protocol_name(uint16_t type);
-int enable_promiscuous(char *enterface,int *sock);
+short int set_promiscuous(char *enterface,int *sock, int enbl);
 void dump_addr_info(struct addrinfo *info);
 int get_addrinfo(char* addr, char* port, struct addrinfo **res, net_sock_cfg_t type);
 
