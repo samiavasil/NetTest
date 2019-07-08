@@ -244,7 +244,7 @@ print_macs(struct ether_header* eh)
 	  );
 }
 
-#define INITIAL_TIMEOUT         (100)
+#define INITIAL_TIMEOUT         (10000)
 
 int
 do_sniff(connection_ctx_t*  con_ctx)
@@ -336,10 +336,9 @@ process_new_connection(master_ctx_t* mctx)
     /* queued up on the listening socket before we         */
     /* loop back and call poll again.                      */
     do {
-	printf("accept\n");
 	/* Accept each incoming connection. */
 	new_sd = accept(mctx->fds[LISTENER_FD_IDX].fd, NULL, NULL);
-	printf("accept1\n");
+
 	if (new_sd < 0) {
 	    if (errno != EWOULDBLOCK) {
 		perror("  accept() failed");
@@ -353,7 +352,7 @@ process_new_connection(master_ctx_t* mctx)
 	    close(new_sd);
 	    continue;
 	}
-	printf("set_block\n");
+
 	set_socket_blocking_mode(new_sd, NON_BLOCKING);
 
 	/* Add descriptor to poll*/
@@ -380,43 +379,54 @@ default_svc(connection_ctx_t* ctx)
 	perror("  missing context");
 	return TRUE;
     }
+    /* If revents is not POLLIN, it's an unexpected result,  */
+    /* log and end the server.                               */
+    if (ctx->fd->revents != POLLIN) {
+	printf("  Error! revents[%d] = %d\n",
+	       ctx->fd->fd, ctx->fd->revents);
+	close_conn = TRUE;
+    }
 
-    /* Receive all incoming data on this socket            */
-    /* before we loop back and call poll again.            */
-    do {
-	/* Receive data on this connection until the         */
-	/* recv fails with EWOULDBLOCK. If any other         */
-	/* failure occurs, we will close the                 */
-	/* connection.                                       */
-	rc = recv(ctx->fd->fd, buffer, sizeof(buffer), 0);
-	if (rc < 0) {
-	    if (errno != EWOULDBLOCK) {
-		perror("  recv() failed");
-		close_conn = TRUE;
+    /* This is not the listening socket, therefore an        */
+    /* existing connection must be readable                  */
+    else {
+
+	/* Receive all incoming data on this socket            */
+	/* before we loop back and call poll again.            */
+	do {
+	    /* Receive data on this connection until the         */
+	    /* recv fails with EWOULDBLOCK. If any other         */
+	    /* failure occurs, we will close the                 */
+	    /* connection.                                       */
+	    rc = recv(ctx->fd->fd, buffer, sizeof(buffer), 0);
+	    if (rc < 0) {
+		if (errno != EWOULDBLOCK) {
+		    perror("  recv() failed");
+		    close_conn = TRUE;
+		}
+		break;
 	    }
-	    break;
-	}
 
-	/* Check to see if the connection has been           */
-	/* closed by the client                              */
-	if (rc == 0) {
-	    printf("  Connection closed\n");
-	    close_conn = TRUE;
-	    break;
-	}
+	    /* Check to see if the connection has been           */
+	    /* closed by the client                              */
+	    if (rc == 0) {
+		printf("  Connection closed\n");
+		close_conn = TRUE;
+		break;
+	    }
 
-	/* Data was received                                 */
-	len = rc;
-	printf("  %d bytes received\n", len);
+	    /* Data was received                                 */
+	    len = rc;
+	    printf("  %d bytes received\n", len);
 
-	rc = send(ctx->fd->fd, buffer, len, 0);
-	if (rc < 0) {
-	    perror("  send() failed");
-	    close_conn = TRUE;
-	    break;
-	}
-    } while (TRUE);
-
+	    rc = send(ctx->fd->fd, buffer, len, 0);
+	    if (rc < 0) {
+		perror("  send() failed");
+		close_conn = TRUE;
+		break;
+	    }
+	} while (TRUE);
+    }  /* End of existing connection is readable             */
     return close_conn;
 }
 
@@ -425,7 +435,8 @@ default_svc(connection_ctx_t* ctx)
 connect_client(connection_ctx_t* ctx)
 {
 
-    int len, rc;
+    static int len = 0;
+    int rc = 0;
     int close_conn = FALSE;
     char   buffer[80];/*TODO: Adjust buffer size to the maximum value*/
 
@@ -434,42 +445,55 @@ connect_client(connection_ctx_t* ctx)
 	return TRUE;
     }
 
-    /* Receive all incoming data on this socket            */
-    /* before we loop back and call poll again.            */
-    do {
-	/* Receive data on this connection until the         */
-	/* recv fails with EWOULDBLOCK. If any other         */
-	/* failure occurs, we will close the                 */
-	/* connection.                                       */
-	rc = recv(ctx->fd->fd, buffer, sizeof(buffer), 0);
-	if (rc < 0) {
-	    if (errno != EWOULDBLOCK) {
-		perror("  recv() failed");
-		close_conn = TRUE;
+    if (!(ctx->fd->revents & POLLIN)) {
+	printf("  Error! revents[%d] = %d\n",
+	       ctx->fd->fd, ctx->fd->revents);
+	close_conn = TRUE;
+    } else {
+	/* Receive all incoming data on this socket            */
+	/* before we loop back and call poll again.            */
+	do {
+	    /* Receive data on this connection until the         */
+	    /* recv fails with EWOULDBLOCK. If any other         */
+	    /* failure occurs, we will close the                 */
+	    /* connection.                                       */
+	    rc = recv(ctx->fd->fd, buffer, sizeof(buffer), 0);
+	    if (rc < 0) {
+		if (errno != EWOULDBLOCK) {
+		    perror("  recv() failed");
+		    close_conn = TRUE;
+		}
+		break;
 	    }
-	    break;
-	}
 
-	/* Check to see if the connection has been           */
-	/* closed by the client                              */
-	if (rc == 0) {
-	    printf("  Connection closed\n");
-	    close_conn = TRUE;
-	    break;
-	}
+	    /* Check to see if the connection has been           */
+	    /* closed by the client                              */
+	    if (rc == 0) {
+		printf("  Connection closed\n");
+		close_conn = TRUE;
+		break;
+	    } else {
+		printf("  %d bytes received\n", rc);
+		buffer[rc] = '\0';
+		printf("%s\n", buffer);
+	    }
 
-	/* Data was received                                 */
-	len = rc;
-	printf("  %d bytes received\n", len);
+	    switch (ctx->status) {
+	    case C_IDLE: {
+		break;
+	    }
+	    case C_ACCEPTED: {
+		break;
+	    }
+	    case C_CONNECTED: {
+		break;
+	    }
+	    default: {
 
-	rc = send(ctx->fd->fd, buffer, len, 0);
-	if (rc < 0) {
-	    perror("  send() failed");
-	    close_conn = TRUE;
-	    break;
-	}
-    } while (TRUE);
-
+	    }
+	    }
+	} while (TRUE);
+    }
     return close_conn;
 }
 
@@ -486,41 +510,28 @@ process_clients(master_ctx_t* mctx)
 	/* Loop through to find the descriptors that returned    */
 	/* POLLIN and determine whether it's the listening       */
 	/* or the active connection.                             */
-	if (mctx->fds[i].revents == 0)
+	if ((mctx->fds[i].revents & mctx->fds[i].revents) == 0)
 	    continue;
 
-	/* If revents is not POLLIN, it's an unexpected result,  */
-	/* log and end the server.                               */
-	if (mctx->fds[i].revents != POLLIN) {
-	    printf("  Error! revents[%d] = %d\n", i,
-		   mctx->fds[i].revents);
-	    close_conn = TRUE;
+	close_conn = FALSE;
+	if (mctx->con[i].status >= C_IDLE &&
+	    mctx->con[i].status <= C_CONNECTED) {
+	    close_conn = connect_client(&mctx->con[i]);
+	} else {
+	    /*Call default connection handler*/
+	    close_conn = default_svc(&mctx->con[i]);
+	}
+	/* If the close_conn flag was turned on, we need     */
+	/* to clean up this active connection. This          */
+	/* clean up process includes removing the            */
+	/* descriptor.                                       */
+	if (close_conn) {
+	    printf("!!! Close connection %d", i);
+	    close(mctx->fds[i].fd);
+	    mctx->fds[i].fd = -1;
+	    compress_array = TRUE;
 	}
 
-	/* This is not the listening socket, therefore an        */
-	/* existing connection must be readable                  */
-	else {
-	    printf("  Descriptor %d is readable\n", mctx->fds[i].fd);
-	    close_conn = FALSE;
-
-	    if (mctx->con[i].status >= C_IDLE &&
-		mctx->con[i].status <= C_CONNECTED) {
-		close_conn = connect_client(&mctx->con[i]);
-	    } else {
-		/*Call default connection handler*/
-		close_conn = default_svc(&mctx->con[i]);
-	    }
-	    /* If the close_conn flag was turned on, we need     */
-	    /* to clean up this active connection. This          */
-	    /* clean up process includes removing the            */
-	    /* descriptor.                                       */
-	    if (close_conn) {
-		printf("!!! Close connection %d", i);
-		close(mctx->fds[i].fd);
-		mctx->fds[i].fd = -1;
-		compress_array = TRUE;
-	    }
-	}  /* End of existing connection is readable             */
     } /* End of loop through pollable descriptors                */
 
 
@@ -736,7 +747,7 @@ main(int argc, char* argv[])
     if (argc > 2) {
 	test_client();
     } else {
-	run_master_service("eno2");
+	run_master_service("enp0s25");//eno2
     }
     return 0;
 }
